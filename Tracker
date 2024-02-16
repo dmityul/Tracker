@@ -1,0 +1,120 @@
+# Импорт необходимых библиотек
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from google.colab import files, drive
+from scipy.spatial import distance
+from tqdm import tqdm
+
+# Подключение Google Диска
+drive.mount('/content/gdrive')
+
+# Загрузка и открытие видео
+video_name = list(files.upload().keys())[0]
+cap = cv2.VideoCapture(video_name)
+
+# Проверка, открыто ли видео
+if not cap.isOpened():
+  print("Ошибка при открытии файла видео")
+
+# Получение частоты кадров и общего количества кадров в видео
+fps, total_frames = cap.get(cv2.CAP_PROP_FPS), int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+# Инициализация списка для хранения координат центра движущегося объекта и переменных для подсчета кадров
+center_coordinates, processed_frames, unrecognized_frames = [None] * total_frames, 0, 0
+
+# Чтение до тех пор, пока видео не закончится или не будет достигнуто указанное время
+ret, frame1 = cap.read()
+for frame_num in range(total_frames):
+  if frame_num / fps >= 900: break  # Определение времени, до которого следует обрабатывать видео
+  ret, frame2 = cap.read()
+  if not ret: break
+  processed_frames += 1
+  gray1, gray2 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY), cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+  diff = cv2.absdiff(gray1, gray2)
+  _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+  contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+  max_cnt = max(contours, key=cv2.contourArea, default=None)
+  if max_cnt is not None:
+    x, y, w, h = cv2.boundingRect(max_cnt)
+    cv2.rectangle(frame1, (x, y), (x+w, y+h), (0, 255, 0), 2)
+    center_coordinates[frame_num] = (x+w//2, y+h//2)
+  else:
+    unrecognized_frames += 1
+  frame1 = frame2.copy()
+
+cap.release()  # Закрытие видео
+
+# Вывод общего количества кадров и количества обработанных кадров
+print(f"Общее количество кадров в видео: {total_frames}")
+print(f"Количество обработанных кадров: {processed_frames}")
+print(f"Количество нераспознанных кадров: {unrecognized_frames}")
+
+# Вычисление угла вращения и угловой скорости
+angles, angular_speeds, rotation_directions, cumulative_angles = [0], [0], [0], [0]
+for i in range(2, min(len(center_coordinates), int(900 * fps))):
+  angle, angular_speed, rotation_direction = 0, 0, rotation_directions[-1]
+  if all(center_coordinates[i-j] is not None for j in range(3)):
+    v1, v2 = np.array(center_coordinates[i-1]) - np.array(center_coordinates[i-2]), np.array(center_coordinates[i]) - np.array(center_coordinates[i-1])
+    norm_v1, norm_v2 = np.linalg.norm(v1), np.linalg.norm(v2)
+    if norm_v1 > 0 and norm_v2 > 0:
+      cos_angle = np.clip(np.dot(v1, v2) / (norm_v1 * norm_v2), -1, 1)
+      angle = np.arccos(cos_angle)
+      rotation_direction = -np.sign(np.cross(v1, v2))
+      angle *= rotation_direction
+      angular_speed = angle / (1/fps)
+  angles.append(angle)
+  angular_speeds.append(angular_speed)
+  rotation_directions.append(rotation_direction)
+  cumulative_angles.append(cumulative_angles[-1] + angle)
+
+# Инициализация переменных для подсчета времени
+counterclockwise_time, clockwise_time, motionless_time, unrecognized_time = 0, 0, 0, 0
+for i in range(1, min(len(angular_speeds), int(900 * fps))):
+  if angular_speeds[i] > 0:
+    counterclockwise_time += 1/fps
+  elif angular_speeds[i] < 0:
+    clockwise_time += 1/fps
+  elif center_coordinates[i] is not None:
+    motionless_time += 1/fps
+  else:
+    unrecognized_time += 1/fps
+
+# Вывод результатов
+print(f"Общее время видео: {frame_num / fps} секунд")
+print(f"Общее время движения против часовой стрелки: {counterclockwise_time} секунд")
+print(f"Общее время движения по часовой стрелке: {clockwise_time} секунд")
+print(f"Время покоя (неподвижные кадры): {motionless_time} секунд")
+print(f"Неучтённое время (кадры, где контур не может быть распознан): {unrecognized_time} секунд")
+
+# Вывод данных в таблицу
+df = pd.DataFrame({'Angle': angles, 'Angular Speed': angular_speeds, 'Rotation Direction': rotation_directions, 'Cumulative Angle': cumulative_angles, 'Total Time': frame_num / fps, 'Counterclockwise Time': counterclockwise_time, 'Clockwise Time': clockwise_time, 'Motionless Time': motionless_time, 'Unrecognized Time': unrecognized_time})
+df.to_excel('/content/gdrive/My Drive/data.xlsx')
+
+# Рисование графиков зависимости угла вращения и угловой скорости от времени
+plt.figure(figsize=(18, 6))
+plt.subplot(1, 3, 1)
+plt.plot(np.arange(len(angles))/fps, angles)
+plt.title('Угол вращения')
+plt.xlabel('Время (с)')
+plt.ylabel('Угол (рад)')
+plt.subplot(1, 3, 2)
+plt.plot(np.arange(len(angular_speeds))/fps, angular_speeds)
+plt.title('Угловая скорость')
+plt.xlabel('Время (с)')
+plt.ylabel('Угловая скорость (рад/с)')
+plt.subplot(1, 3, 3)
+plt.plot(np.arange(len(cumulative_angles))/fps, cumulative_angles)
+plt.title('Кумулятивный угол')
+plt.xlabel('Время (с)')
+plt.ylabel('Угол (рад)')
+plt.tight_layout()
+plt.savefig('/content/gdrive/My Drive/graphs.png')
+
+# Инициализация списка для хранения информации о статусе каждого кадра
+frame_status = ['Moving' if angular_speeds[i] != 0 else 'Zero' if center_coordinates[i] is not None else 'None' for i in range(len(angular_speeds))]
+
+# Добавление столбца 'Frame Status' в DataFrame и сохранение данных в новый файл Excel
+df['Frame Status'] = frame_status
+df.to_excel('/content/gdrive/My Drive/data_with_frame_status.xlsx')
